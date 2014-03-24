@@ -22,7 +22,7 @@ parameter_groups:
 - label: Instance level params
   description: General OpenShift parameters
   parameters:
-  - hostname
+  - instance_hostname
   - foreman_hostname
   - ipa_hostname
   - ipa_realm
@@ -68,7 +68,7 @@ parameters:
   private_subnet_id:
     type: string
     description: ID of private sub network into which servers get deployed
-  hostname:
+  instance_hostname:
     type: string
     description: hostname of instance
   foreman_hostname:
@@ -118,107 +118,107 @@ resources:
             yum -y install http://yum.puppetlabs.com/el/6/products/x86_64/puppetlabs-release-6-10.noarch.rpm
             yum -y install augeas
 
-			hostname $hostname$
-            augtool set /files/etc/sysconfig/network/HOSTNAME $hostname$
+            hostname HOSTNAME
+            augtool set /files/etc/sysconfig/network/HOSTNAME HOSTNAME
 
             yum install -y puppet facter tar bind
 
-			# Dirty IPA and Puppet Cert enrollment until implemented into smart-proxy
-			/usr/sbin/ipa-client-install --domain=$ipa_domain$ --enable-dns-updates --realm=$ipa_realm$ --server=$ipa_hostname$ --principal $ipa_user$@$ipa_realm$ --password $ipa_password$ --unattended
+            # Dirty IPA and Puppet Cert enrollment until implemented into smart-proxy
+            /usr/sbin/ipa-client-install --domain=IPA_DOMAIN --enable-dns-updates --realm=IPA_REALM --server=IPA_HOSTNAME --principal IPA_USER@IPA_REALM --password IPA_PASSWORD --unattended
 
-			setenforce 0
-			echo $ipa_password$ | kinit $ipa_user$
-			ipa service-add puppet/$hostname$
+            setenforce 0
+            echo IPA_PASSWORD | kinit IPA_USER
+            ipa service-add puppet/HOSTNAME
 
-			mkdir -p /var/lib/puppet/ssl/{private_keys,certs}
+            mkdir -p /var/lib/puppet/ssl/{private_keys,certs}
 
-			# Generate IPA Certificate
-			ipa-getcert request -K puppet/$hostname$  -D $hostname$ \
-			-k /var/lib/puppet/ssl/private_keys/$hostname$.pem \
-			-f /var/lib/puppet/ssl/certs/$hostname$.pem
+            # Generate IPA Certificate
+            ipa-getcert request -K puppet/HOSTNAME  -D HOSTNAME \
+            -k /var/lib/puppet/ssl/private_keys/HOSTNAME.pem \
+            -f /var/lib/puppet/ssl/certs/HOSTNAME.pem
 
-			wait 20;
-			setenforce 1
-			 
-			# Workaround for "stack too deep" problem
-			# http://projects.puppetlabs.com/issues/21869
-			cp /etc/ipa/ca.crt /var/lib/puppet/ssl/certs/ca.pem
-			 
-			cat <<EOF > /etc/puppet/puppet.conf
-			[main]
-				# The Puppet log directory.
-				# The default value is '$vardir/log'.
-				logdir = /var/log/puppet
-			 
-				# Where Puppet PID files are kept.
-				# The default value is '$vardir/run'.
-				rundir = /var/run/puppet
-				ssldir = /var/lib/puppet/ssl
-				server = $foreman_hostname$
-				 
-			[agent]
-				# The file in which puppetd stores a list of the classes
-				# associated with the retrieved configuratiion.  Can be loaded in
-				# the separate ``puppet`` executable using the ``--loadclasses``
-				# option.
-				# The default value is '$confdir/classes.txt'.
-				classfile = $vardir/classes.txt
-			 
-				# Where puppetd caches the local configuration.  An
-				# extension indicating the cache format is added automatically.
-				# The default value is '$confdir/localconfig'.
-				localconfig = $vardir/localconfig
-				 
-				certificate_revocation = false
-				certname = $hostname$
-			EOF
-			 
-			chown -R puppet:puppet /var/lib/puppet/ssl
-			chmod 600 /var/lib/puppet/ssl/{private_keys,certs}/$hostname$.pem
+            wait 20;
+            setenforce 1
+             
+            # Workaround for "stack too deep" problem
+            # http://projects.puppetlabs.com/issues/21869
+            cp /etc/ipa/ca.crt /var/lib/puppet/ssl/certs/ca.pem
+             
+            cat <<EOF > /etc/puppet/puppet.conf
+            [main]
+            	# The Puppet log directory.
+            	# The default value is '$vardir/log'.
+            	logdir = /var/log/puppet
+             
+            	# Where Puppet PID files are kept.
+            	# The default value is '$vardir/run'.
+            	rundir = /var/run/puppet
+            	ssldir = /var/lib/puppet/ssl
+            	server = FOREMAN_HOSTNAME
+            	 
+            [agent]
+            	# The file in which puppetd stores a list of the classes
+            	# associated with the retrieved configuratiion.  Can be loaded in
+            	# the separate ``puppet`` executable using the ``--loadclasses``
+            	# option.
+            	# The default value is '$confdir/classes.txt'.
+            	classfile = $vardir/classes.txt
+             
+            	# Where puppetd caches the local configuration.  An
+            	# extension indicating the cache format is added automatically.
+            	# The default value is '$confdir/localconfig'.
+            	localconfig = $vardir/localconfig
+            	 
+            	certificate_revocation = false
+            	certname = HOSTNAME
+            EOF
+             
+            chown -R puppet:puppet /var/lib/puppet/ssl
+            chmod 600 /var/lib/puppet/ssl/{private_keys,certs}/HOSTNAME.pem
 
-			puppet agent --test
-			chkconfig puppet on
+            puppet agent --test
+            chkconfig puppet on
 
-			# configure cfn
+            # configure cfn
             cat <<EOF > /etc/cfn/cfn-credentials
-            AWSAccessKeyId=$AWS_KEY$
-            AWSSecretKey=$AWS_SECRET$
+            AWSAccessKeyId=AWS_KEY
+            AWSSecretKey=AWS_SECRET
             EOF
             chmod 000400 /etc/cfn/cfn-credentials
 
-			cat <<EOF > /etc/cfn/cfn-hup.conf
-			[main] 
-			stack=$stack_name$ 
-			credential-file=/etc/cfn/cfn-credentials 
-			region='nova'
-			interval=60 
-			EOF
+            cat <<EOF > /etc/cfn/cfn-hup.conf
+            [main] 
+            stack=STACK_NAME 
+            credential-file=/etc/cfn/cfn-credentials 
+            region='nova'
+            interval=60 
+            EOF
 
-			cat <<EOF > /tmp/cfn-hup-crontab.txt
-			* * * * * /opt/aws/bin/cfn-hup -f
-			* * * * * /opt/aws/bin/cfn-push-stats --watch $HeartbeatFailureAlarm$ --heartbeat
-			EOF
-			chmod 000600 /etc/cfn/cfn-credentials
+            cat <<EOF > /tmp/cfn-hup-crontab.txt
+            * * * * * /opt/aws/bin/cfn-hup -f
+            * * * * * /opt/aws/bin/cfn-push-stats --watch HEARTBEATFAILUREALARM --heartbeat
+            EOF
+            chmod 000600 /etc/cfn/cfn-credentials
 
-			# install cfn-hup crontab
-			crontab /tmp/cfn-hup-crontab.txt
+            # install cfn-hup crontab
+            crontab /tmp/cfn-hup-crontab.txt
 
             reboot
 
           params:
-            $hostname$: { get_param: hostname }
-            $foreman_hostname$: { get_param: foreman_hostname }
-            $ipa_hostname$: { get_param: ipa_hostname }
-            $ipa_realm$: { get_param: ipa_realm }
-            $ipa_domain$: { get_param: ipa_domain }
-            $ipa_user$: { get_param: ipa_user }
-            $ipa_password$: { get_param: ipa_password }
+            HOSTNAME: { get_param: instance_hostname }
+            FOREMAN_HOSTNAME: { get_param: foreman_hostname }
+            IPA_HOSTNAME: { get_param: ipa_hostname }
+            IPA_REALM: { get_param: ipa_realm }
+            IPA_DOMAIN: { get_param: ipa_domain }
+            IPA_USER: { get_param: ipa_user }
+            IPA_PASSWORD: { get_param: ipa_password }
 
-            $AWS_KEY$: { get_resource: ServerKeys }
-            $AWS_SECRET$: { get_attr: [ServerKeys, SecretAccessKey ] }
+            AWS_KEY: { get_resource: ServerKeys }
+            AWS_SECRET: { get_attr: [ServerKeys, SecretAccessKey ] }
 
-			$stack_name$: { get_param: 'OS::stack_name' } 
-			$HeartbeatFailureAlarm$: { get_resource: HeartbeatFailureAlarm }
+            STACK_NAME: { get_param: 'OS::stack_name' } 
+            HEARTBEATFAILUREALARM: { get_resource: HeartbeatFailureAlarm }
 
   nova_instance_port:
     type: OS::Neutron::Port
