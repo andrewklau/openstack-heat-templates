@@ -30,7 +30,7 @@ parameter_groups:
   - ipa_user
   - ipa_password
 parameters:
-  key_name
+  key_name:
     type: string
     description: SSH key pair
     constraints:
