@@ -1,0 +1,271 @@
+heat_template_version: 2013-05-23
+
+description: >
+  Template (HOT) for deploying high available instances 
+  taking advantage CWLiteAlarm to restart the instance if it fails
+  to respond. The instance gets configured with a cinder volume and
+  floating IP. Used for deploying into our custom environment.
+  Makes use of FreeIPA and Foreman for puppet check-in and management.
+parameter_groups:
+- label: General parameters
+  description: General OpenStack parameters
+  parameters:
+  - name
+  - key_name
+  - image_id
+  - availability_zone
+  - volume_size
+  - instance_type
+  - public_net_id
+  - private_net_id
+  - private_subnet_id
+- label: Instance level params
+  description: General OpenShift parameters
+  parameters:
+  - hostname
+  - foreman_hostname
+  - ipa_hostname
+  - ipa_realm
+  - ipa_domain
+  - ipa_user
+  - ipa_password
+parameters:
+  key_name
+    type: string
+    description: SSH key pair
+    constraints:
+      - custom_constraint: nova.keypair
+  image_id:
+    type: string
+    description: ID of the image to use for the instance to be created.
+    default: centos-6.5-x86_64-cfntools
+  availability_zone:
+    type: string
+    description: The Availability Zone to launch the instance.
+    default: nova
+  volume_size:
+    type: number
+    description: Size of the volume to be created.
+    default: 1
+    constraints:
+      - range: { min: 5, max: 1024 }
+        description: must be between 1 and 1024 Gb.
+  instance_type:
+    type: string
+    label: Instance Type
+    description: Type of instance (flavor) to be used
+    default: m1.medium
+    constraints:
+      - allow_values: [ m1.tiny, m1.small, m1.medium, m1.large, m1.xlarge ]
+        description: Value must be one of m1.tiny, m1.small, m1.medium, m1.large or m1.xlarge.
+  public_net_id:
+    type: string
+    description: >
+      ID of public network for which floating IP addresses will be allocated
+  private_net_id:
+    type: string
+    description: ID of private network into which servers get deployed
+  private_subnet_id:
+    type: string
+    description: ID of private sub network into which servers get deployed
+  hostname:
+    type: string
+    description: hostname of instance
+  foreman_hostname:
+    type: string
+    description: hostname of foreman server
+  ipa_hostname:
+    type: string
+    description: hostname of ipa server
+  ipa_realm:
+    type: string
+    description: ipa realm eg. EXAMPLE.COM
+  ipa_domain:
+    type: string
+    description: ipa domain eg. example.com
+  ipa_user:
+    type: string
+    description: ipa admin which has host enrollment permissions
+  ipa_password:
+    type: string
+    description: ipa admin's password which has host enrollment permissions
+
+resources:
+  CfnUser: 
+    type: AWS::IAM::User
+  ServerKeys:
+    Type: 'AWS::IAM::AccessKey'
+    DependsOn: CfnUser
+    Properties:
+      UserName:
+        Ref: CfnUser
+  nova_instance:
+    type: OS::Nova::Server
+    properties:
+      name: { get_parm: name }
+      availability_zone: { get_param: availability_zone }
+      image: { get_param: image_id }
+      flavor: { get_param: instance_type }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: nova_instance_port }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+
+            yum -y install http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm
+            yum -y install http://yum.puppetlabs.com/el/6/products/x86_64/puppetlabs-release-6-10.noarch.rpm
+            yum -y install augeas
+
+			hostname $hostname$
+            augtool set /files/etc/sysconfig/network/HOSTNAME $hostname$
+
+            yum install -y puppet facter tar bind
+
+			# Dirty IPA and Puppet Cert enrollment until implemented into smart-proxy
+			/usr/sbin/ipa-client-install --domain=$ipa_domain$ --enable-dns-updates --realm=$ipa_realm$ --server=$ipa_hostname$ --principal $ipa_user$@$ipa_realm$ --password $ipa_password$ --unattended
+
+			setenforce 0
+			echo $ipa_password$ | kinit $ipa_user$
+			ipa service-add puppet/$hostname$
+
+			mkdir -p /var/lib/puppet/ssl/{private_keys,certs}
+
+			# Generate IPA Certificate
+			ipa-getcert request -K puppet/$hostname$  -D $hostname$ \
+			-k /var/lib/puppet/ssl/private_keys/$hostname$.pem \
+			-f /var/lib/puppet/ssl/certs/$hostname$.pem
+
+			wait 20;
+			setenforce 1
+			 
+			# Workaround for "stack too deep" problem
+			# http://projects.puppetlabs.com/issues/21869
+			cp /etc/ipa/ca.crt /var/lib/puppet/ssl/certs/ca.pem
+			 
+			cat <<EOF > /etc/puppet/puppet.conf
+			[main]
+				# The Puppet log directory.
+				# The default value is '$vardir/log'.
+				logdir = /var/log/puppet
+			 
+				# Where Puppet PID files are kept.
+				# The default value is '$vardir/run'.
+				rundir = /var/run/puppet
+				ssldir = /var/lib/puppet/ssl
+				server = $foreman_hostname$
+				 
+			[agent]
+				# The file in which puppetd stores a list of the classes
+				# associated with the retrieved configuratiion.  Can be loaded in
+				# the separate ``puppet`` executable using the ``--loadclasses``
+				# option.
+				# The default value is '$confdir/classes.txt'.
+				classfile = $vardir/classes.txt
+			 
+				# Where puppetd caches the local configuration.  An
+				# extension indicating the cache format is added automatically.
+				# The default value is '$confdir/localconfig'.
+				localconfig = $vardir/localconfig
+				 
+				certificate_revocation = false
+				certname = $hostname$
+			EOF
+			 
+			chown -R puppet:puppet /var/lib/puppet/ssl
+			chmod 600 /var/lib/puppet/ssl/{private_keys,certs}/$hostname$.pem
+
+			puppet agent --test
+			chkconfig puppet on
+
+			# configure cfn
+            cat <<EOF > /etc/cfn/cfn-credentials
+            AWSAccessKeyId=$AWS_KEY$
+            AWSSecretKey=$AWS_SECRET$
+            EOF
+            chmod 000400 /etc/cfn/cfn-credentials
+
+			cat <<EOF > /etc/cfn/cfn-hup.conf
+			[main] 
+			stack=$stack_name$ 
+			credential-file=/etc/cfn/cfn-credentials 
+			region='nova'
+			interval=60 
+			EOF
+
+			cat <<EOF > /tmp/cfn-hup-crontab.txt
+			* * * * * /opt/aws/bin/cfn-hup -f
+			* * * * * /opt/aws/bin/cfn-push-stats --watch $HeartbeatFailureAlarm$ --heartbeat
+			EOF
+			chmod 000600 /etc/cfn/cfn-credentials
+
+			# install cfn-hup crontab
+			crontab /tmp/cfn-hup-crontab.txt
+
+            reboot
+
+          params:
+            $hostname$: { get_param: hostname }
+            $foreman_hostname$: { get_param: foreman_hostname }
+            $ipa_hostname$: { get_param: ipa_hostname }
+            $ipa_realm$: { get_param: ipa_realm }
+            $ipa_domain$: { get_param: ipa_domain }
+            $ipa_user$: { get_param: ipa_user }
+            $ipa_password$: { get_param: ipa_password }
+
+            $AWS_KEY$: { get_resource: ServerKeys }
+            $AWS_SECRET$: { get_attr: [ServerKeys, SecretAccessKey ] }
+
+			$stack_name$: { get_param: 'OS::stack_name' } 
+			$HeartbeatFailureAlarm$: { get_resource: HeartbeatFailureAlarm }
+
+  nova_instance_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: private_net_id }
+      fixed_ips:
+        - subnet_id: { get_param: private_subnet_id }
+
+  nova_instance_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_net_id }
+      port_id: { get_resource: nova_instance_port }
+
+  cinder_volume:
+    type: OS::Cinder::Volume
+    properties:
+      size: { get_param: volume_size }
+      availability_zone: { get_param: availability_zone }
+  volume_attachment:
+    type: OS::Cinder::VolumeAttachment
+    properties:
+      volume_id: { get_resource: cinder_volume }
+      instance_uuid: { get_resource: nova_instance }
+      mountpoint: /dev/vdc
+
+  RestartPolicy:
+    type: OS::Heat::HARestarter
+    properties:
+      InstanceId: nova_instance
+  HeartbeatFailureAlarm:
+    type: OS::Heat::CWLiteAlarm
+    properties:
+      AlarmActions: RestartPolicy
+      AlarmDescription: Restart the Instance if we miss a heartbeat
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Heartbeat
+      Namespace: system/linux
+      Period: 60
+      Statistic: SampleCount
+      Threshold: 1
+
+outputs:
+  nova_instance_private_ip:
+    description: IP address of server1 in private network
+    value: { get_attr: [ nova_instance, first_address ] }
+  nova_instance_public_ip:
+    description: Floating IP address of server1 in public network
+    value: { get_attr: [ nova_instance_floating_ip, floating_ip_address ] }
